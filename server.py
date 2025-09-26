@@ -1,18 +1,20 @@
 
 from dotenv import load_dotenv
+from fastapi_mail import FastMail, MessageSchema, MessageType
 load_dotenv()
 
 import os, time, secrets, contextlib, warnings, jwt
 from jwt import PyJWTError
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, Request, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import asynccontextmanager
 from apps.vision.services.engine import AgentEngine
 from apps.vision.basic_agent.agent import basic_agent
 from apps.vision.pro_agent.agent import pro_agent
+from apps.vision.config import mail_config
 from apps.vision.shared.auth import SESSION_TTL, TICKET_TTL_MIN, create_ticket, extract_roles_from_claims, extract_subject_ids, extract_ticket, get_agent_tier_from_roles, validate_access_token_raw, validate_ticket  
 
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
@@ -108,8 +110,6 @@ async def session_init(request: Request) -> JSONResponse:
     ticket = create_ticket(sid=session_id, tier=tier, sub=sub)
     session["ticket"] = ticket
 
-    print(f"Setting sse_ticket cookie with value: {ticket[:20]}...")
-
     resp = JSONResponse({
         "session_id": session_id,
         "tier": tier,
@@ -122,7 +122,7 @@ async def session_init(request: Request) -> JSONResponse:
         ticket,
         max_age=TICKET_TTL_MIN * 60,
         httponly=True,
-        secure=False, # set to true in PROD
+        secure=True if ENV == "PROD" else False, 
         samesite="Lax",
         path="/"
     )
@@ -156,7 +156,7 @@ async def sse_events(session_id: str, request: Request, ticket: Optional[str] = 
             async for data in session["agent_session"].agent_to_client_sse():
                 yield data
         except Exception as e:
-            print(f"SSE error sid={session_id}: {e}")
+            print(f"SSE error: {e}")
         finally:
             with contextlib.suppress(Exception):
                 await session["agent_session"].close()
@@ -178,3 +178,25 @@ async def send_message(session_id: str, request: Request, ticket: Optional[str] 
     msg = await request.json()
     await session["agent_session"].client_to_agent_sse(message=msg)
     return JSONResponse({"ok": True})
+
+# @app.post("/feedback/send")
+# async def send_feedback(background_tasks: BackgroundTasks, request: Request) -> JSONResponse:
+#     data = await request.json()
+
+#     feedback_msg = data.get("feedback", "No feedback provided")
+
+#     html = f"<h1>User Feedback</h1>\n<p>{feedback_msg}</p>"
+
+#     message = MessageSchema(
+#         subject="Feedback about Vision AI",
+#         recipients=[""],
+#         body=html,
+#         subtype=MessageType.html
+#     )
+
+#     fm = FastMail(mail_config)
+
+#     background_tasks.add_task(fm.send_message, message)
+
+#     return JSONResponse(status_code=200, content={"message": "Feedback received!"})
+

@@ -11,7 +11,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from pydantic import BaseModel
 
-JWT_SECRET = os.getenv("SESSION_TICKET_SECRET", "dev-secret")
+JWT_SECRET = os.getenv("SESSION_TICKET_SECRET")
 JWT_ALG = "HS256"
 TICKET_TTL_MIN = 15
 SESSION_TTL = 60 * 10 # 10 min
@@ -216,7 +216,7 @@ def extract_ticket(request: Request, ticket_q: Optional[str]) -> str:
 def validate_ticket(token: str) -> dict:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-        print(f"Decoded ticket: {payload}")  # Debug log
+        print(f"Decoded ticket")  # Debug log
         return payload
     except JWTError as e:
         print(f"JWT decode error: {e}")  # Debug log
