@@ -11,6 +11,8 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from pydantic import BaseModel
 
+from apps.vision.shared.types import Tier
+
 JWT_SECRET = os.getenv("SESSION_TICKET_SECRET")
 JWT_ALG = "HS256"
 TICKET_TTL_MIN = 15
@@ -205,6 +207,19 @@ def create_ticket(*, sid: str, tier: str, sub: Optional[str]) -> str:
 
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
+def create_token(*, sid: str, tier: str, sub: Optional[str]) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sid": sid, "tier": tier,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=TICKET_TTL_MIN)).timestamp()),
+    }
+    # Only include 'sub' if it's not None
+    if sub is not None:
+        payload["sub"] = sub
+
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+
 def extract_ticket(request: Request, ticket_q: Optional[str]) -> str:
     if ticket_q:
         return ticket_q
@@ -212,6 +227,12 @@ def extract_ticket(request: Request, ticket_q: Optional[str]) -> str:
     if not cookie_ticket:
         raise HTTPException(401, "Missing ticket")
     return cookie_ticket
+
+def extract_token(request: Request) -> Optional[str]:
+    token = request.cookies.get("token")
+    if not token:
+        return None
+    return token
 
 def validate_ticket(token: str) -> dict:
     try:
@@ -225,8 +246,20 @@ def validate_ticket(token: str) -> dict:
         print(f"Unexpected error decoding ticket: {e}")  # Debug log
         raise HTTPException(status_code=401, detail="Error decoding ticket")
 
+def validate_token(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+        print(f"Decoded token")  # Debug log
+        return payload
+    except JWTError as e:
+        print(f"JWT decode error: {e}")  # Debug log
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    except Exception as e:
+        print(f"Unexpected error decoding ticket: {e}")  # Debug log
+        raise HTTPException(status_code=401, detail="Error decoding token")
+
 def get_agent_tier_from_roles(roles: list[str]) -> str:
     roles = {x.lower() for x in roles or []}
-    if "admin" in roles or "advanced" in roles: return "advanced"
-    if "pro" in roles: return "pro"
-    return "basic"
+    if "admin" in roles or "advanced" in roles: return Tier.PRO.value
+    if "pro" in roles: return Tier.PRO.value
+    return Tier.BASIC.value

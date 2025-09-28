@@ -1,6 +1,9 @@
 
 from dotenv import load_dotenv
 from fastapi_mail import FastMail, MessageSchema, MessageType
+
+from apps.vision.services.session_service import SessionService
+from apps.vision.shared.types import Tier
 load_dotenv()
 
 import os, time, secrets, contextlib, warnings, jwt
@@ -15,29 +18,23 @@ from apps.vision.services.engine import AgentEngine
 from apps.vision.basic_agent.agent import basic_agent
 from apps.vision.pro_agent.agent import pro_agent
 from apps.vision.config import mail_config
-from apps.vision.shared.auth import SESSION_TTL, TICKET_TTL_MIN, create_ticket, extract_roles_from_claims, extract_subject_ids, extract_ticket, get_agent_tier_from_roles, validate_access_token_raw, validate_ticket  
+from apps.vision.shared.auth import SESSION_TTL, TICKET_TTL_MIN, create_token, extract_roles_from_claims, extract_subject_ids, extract_ticket, extract_token, get_agent_tier_from_roles, validate_access_token_raw, validate_ticket, validate_token  
 
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 ENV = os.getenv("ENV") or "dev"
-APP_NAME = "Vision AI"
+GUEST_USER = os.getenv("GUEST_USER")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     app.state.sessions = {}
-    app.state.agents = {
-        "basic":   AgentEngine(app_name=APP_NAME, base_agent=basic_agent),
-        "pro":     AgentEngine(app_name=APP_NAME, base_agent=pro_agent),
-    }
+    app.state.hosts = {}
     try:
         yield
     finally:
-        # Shutdown
-            for agent in app.state.agents.values():
-                with contextlib.suppress(Exception):
-                    await agent.aclose()
+       pass
 
 app = FastAPI(lifespan=lifespan)
 
@@ -58,34 +55,14 @@ async def add_security_headers(request, call_next):
 
 @app.post("/session/init")
 async def session_init(request: Request) -> JSONResponse:
+    token = extract_token(request)
+    # If token exists don't re-initialize
+    if token: return 
+
     auth = request.headers.get("Authorization")
-    body = {}
-    if request.headers.get("content-type","").startswith("application/json"):
-        with contextlib.suppress(Exception):
-            body = await request.json()
 
-    requested_sid = body.get("session_id") if isinstance(body, dict) else None
-    reuse = False
-    if requested_sid and requested_sid in app.state.sessions:
-        session_id = requested_sid
-        reuse = True
-    else:
-        session_id = secrets.token_urlsafe(24)
-        app.state.sessions[session_id] = {
-            "created": time.time(),
-            "user": None,
-            "roles": [],
-            "tier": "basic",
-            "ticket": None,
-            "agent_session": None,
-            "is_guest": True,
-        }
-
-    session = app.state.sessions[session_id]
-    tier = session.get("tier","basic")
-    is_guest = session.get("is_guest", True)
-    sub = None
-    roles = session.get("roles", [])
+    tier = Tier.BASIC.value
+    user_id = GUEST_USER + secrets.token_urlsafe(24)
 
     if auth and auth.lower().startswith("bearer "):
         token = auth.split(" ",1)[1]
@@ -94,33 +71,30 @@ async def session_init(request: Request) -> JSONResponse:
             roles = extract_roles_from_claims(claims.model_dump())
             tid, oid = extract_subject_ids(claims.model_dump())
             if tid and oid:
-                sub = oid
                 tier = get_agent_tier_from_roles(roles)
-                is_guest = False
-                session.update({
-                    "user": (tid, oid),
-                    "roles": roles,
-                    "tier": tier,
-                    "is_guest": False,
-                    "attached_at": time.time()
-                })
+                user_id = str((tid, oid))
+
         except Exception as e:
-            print(f"[session/init] auth invalid -> guest: {e}")
+            raise HTTPException(401,"[session/init] auth invalid -> guest: {e}")
 
-    ticket = create_ticket(sid=session_id, tier=tier, sub=sub)
-    session["ticket"] = ticket
-
-    resp = JSONResponse({
-        "session_id": session_id,
+    # Create session
+    session = await SessionService.create_session(user_id=user_id)
+    # Create token
+    token = create_token(sid=session.id, tier=tier, sub=None)
+    # Store detials in app state
+    app.state.sessions[session.id] = {
+        "user_id": user_id,
         "tier": tier,
-        "is_guest": is_guest,
-        "roles": roles,
-        "reused": reuse
-    })
+        "session_id": session.id,
+        "created_at": time.time(),
+    }
+
+    resp = JSONResponse(status_code=200, content={"message": "Session created"})
+
     resp.set_cookie(
-        "sse_ticket",
-        ticket,
-        max_age=TICKET_TTL_MIN * 60,
+        "token",
+        token,
+        max_age=None if auth else TICKET_TTL_MIN * 60,
         httponly=True,
         secure=True if ENV == "PROD" else False, 
         samesite="Lax",
@@ -129,55 +103,62 @@ async def session_init(request: Request) -> JSONResponse:
 
     return resp
 
-@app.get("/events/{session_id}")
-async def sse_events(session_id: str, request: Request, ticket: Optional[str] = Query(None)):
-    token = extract_ticket(request, ticket)
-    claims = validate_ticket(token)
-    if claims["sid"] != session_id:
-        raise HTTPException(403, "Ticket session mismatch")
+@app.get("/stream")
+async def sse_events(request: Request):
+    token = extract_token(request)
+    if not token:
+        raise HTTPException(401, "Missing token")
+    
+    claims = validate_token(token)
 
-    session = app.state.sessions.get(session_id)
-    if not session:
+    session_id = claims["sid"]
+
+    session_data = app.state.sessions.get(session_id)
+    if not session_data:
         raise HTTPException(404, "Session not found")
-    if (time.time() - session["created"]) > SESSION_TTL and session["user"] is None:
+    if (time.time() - session_data["created_at"]) > SESSION_TTL and session_data["user_id"].startswith(GUEST_USER):
         raise HTTPException(401, "Session expired")
 
+    user_id = session_data["user_id"]
     tier = claims["tier"]
-    agent = app.state.agents.get(tier) or app.state.agents["basic"]
 
-    if not session.get("agent_session"):
-        agent_session = await agent.create_session(
-            user_id=session["user"][1] if session["user"] else session_id
-        )
-        session["agent_session"] = agent_session
+    # Get session object
+    session = await SessionService.get_session(user_id, session_id)
+    # Start the session
+    live_events, live_request_queue = await SessionService.start_session(session=session, tier=tier, voice_chat=False)
+
+    # store request queue in state
+    session_data["live_request_queue"] = live_request_queue
 
     async def stream():
         try:
-            async for data in session["agent_session"].agent_to_client_sse():
+            async for data in SessionService.stream_sse_agent_to_client(live_events):
                 yield data
         except Exception as e:
             print(f"SSE error: {e}")
         finally:
             with contextlib.suppress(Exception):
-                await session["agent_session"].close()
-            session["agent_session"] = None
+                await live_request_queue.close()
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
-@app.post("/sessions/{session_id}/messages")
-async def send_message(session_id: str, request: Request, ticket: Optional[str] = Query(None)):
-    token = extract_ticket(request, ticket)
-    claims = validate_ticket(token)
-    if claims["sid"] != session_id:
-        raise HTTPException(403, "Ticket session mismatch")
+@app.post("/send")
+async def send_message(request: Request):
+    token = extract_token(request)
+    if not token:
+        raise HTTPException(401, "Missing token")
+    
+    claims = validate_token(token)
+    session_id = claims["sid"]
 
-    session = app.state.sessions.get(session_id)
-    if not session or not session.get("agent_session"):
+    session_data = app.state.sessions.get(session_id)
+    if not session_data or not session_data.get("live_request_queue"):
         raise HTTPException(404, "Session not found or not connected")
 
-    msg = await request.json()
-    await session["agent_session"].client_to_agent_sse(message=msg)
-    return JSONResponse({"ok": True})
+    live_request_queue = session_data.get("live_request_queue")
+    request = await request.json()
+    await SessionService.client_to_agent_sse(live_request_queue, request)
+    return JSONResponse({"Message sent": True})
 
 # @app.post("/feedback/send")
 # async def send_feedback(background_tasks: BackgroundTasks, request: Request) -> JSONResponse:

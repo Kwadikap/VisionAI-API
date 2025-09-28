@@ -1,14 +1,18 @@
 from apps.vision.services.session_manager import AgentSessionManager
 from google.adk.runners import InMemoryRunner, Runner
 from google.adk.artifacts import InMemoryArtifactService, GcsArtifactService
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import InMemorySessionService, VertexAiSessionService
 from google.genai.types import Part, Content, Blob, VoiceConfig, SpeechConfig, PrebuiltVoiceConfigDict
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.genai import types
 import os
 
+PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT")
+LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION")
+
 class AgentEngine:
     """App-level engine to create live agent sessions (reuses one Runner)."""
+    session_service = VertexAiSessionService(PROJECT_ID, LOCATION)
 
     def __init__(self, app_name: str, base_agent) -> None:
 
