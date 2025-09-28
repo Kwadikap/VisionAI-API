@@ -6,17 +6,11 @@ from apps.vision.services.session_service import SessionService
 from apps.vision.shared.types import Tier
 load_dotenv()
 
-import os, time, secrets, contextlib, warnings, jwt
-from jwt import PyJWTError
-from datetime import datetime, timedelta, timezone
-from typing import Optional
-from fastapi import BackgroundTasks, FastAPI, Request, HTTPException, Query
+import os, time, secrets, contextlib, warnings
+from fastapi import BackgroundTasks, FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import asynccontextmanager
-from apps.vision.services.engine import AgentEngine
-from apps.vision.basic_agent.agent import basic_agent
-from apps.vision.pro_agent.agent import pro_agent
 from apps.vision.config import mail_config
 from apps.vision.shared.auth import SESSION_TTL, TICKET_TTL_MIN, create_token, extract_roles_from_claims, extract_subject_ids, extract_ticket, extract_token, get_agent_tier_from_roles, validate_access_token_raw, validate_ticket, validate_token  
 
@@ -24,6 +18,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 ENV = os.getenv("ENV") or "dev"
 GUEST_USER = os.getenv("GUEST_USER")
+RECIPIENT = os.getenv("RECIPIENT")
 
 
 @asynccontextmanager
@@ -160,24 +155,24 @@ async def send_message(request: Request):
     await SessionService.client_to_agent_sse(live_request_queue, request)
     return JSONResponse({"Message sent": True})
 
-# @app.post("/feedback/send")
-# async def send_feedback(background_tasks: BackgroundTasks, request: Request) -> JSONResponse:
-#     data = await request.json()
+@app.post("/feedback/send")
+async def send_feedback(background_tasks: BackgroundTasks, request: Request) -> JSONResponse:
+    data = await request.json()
 
-#     feedback_msg = data.get("feedback", "No feedback provided")
+    feedback_msg = data.get("feedback", "No feedback provided")
 
-#     html = f"<h1>User Feedback</h1>\n<p>{feedback_msg}</p>"
+    html = f"<h1>User Feedback</h1>\n<p>{feedback_msg}</p>"
 
-#     message = MessageSchema(
-#         subject="Feedback about Vision AI",
-#         recipients=[""],
-#         body=html,
-#         subtype=MessageType.html
-#     )
+    message = MessageSchema(
+        subject="Feedback about Vision AI",
+        recipients=[RECIPIENT],
+        body=html,
+        subtype=MessageType.html
+    )
 
-#     fm = FastMail(mail_config)
+    fm = FastMail(mail_config)
 
-#     background_tasks.add_task(fm.send_message, message)
+    background_tasks.add_task(fm.send_message, message)
 
-#     return JSONResponse(status_code=200, content={"message": "Feedback received!"})
+    return JSONResponse(status_code=200, content={"message": "Feedback received!"})
 

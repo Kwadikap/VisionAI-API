@@ -194,19 +194,6 @@ async def get_optional_claims_from_request(request: Request) -> Optional[TokenPa
     except HTTPException:
         return None
 
-def create_ticket(*, sid: str, tier: str, sub: Optional[str]) -> str:
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sid": sid, "tier": tier,
-        "iat": int(now.timestamp()),
-        "exp": int((now + timedelta(minutes=TICKET_TTL_MIN)).timestamp()),
-    }
-    # Only include 'sub' if it's not None
-    if sub is not None:
-        payload["sub"] = sub
-
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
-
 def create_token(*, sid: str, tier: str, sub: Optional[str]) -> str:
     now = datetime.now(timezone.utc)
     payload = {
@@ -220,31 +207,11 @@ def create_token(*, sid: str, tier: str, sub: Optional[str]) -> str:
 
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
-def extract_ticket(request: Request, ticket_q: Optional[str]) -> str:
-    if ticket_q:
-        return ticket_q
-    cookie_ticket = request.cookies.get("sse_ticket")
-    if not cookie_ticket:
-        raise HTTPException(401, "Missing ticket")
-    return cookie_ticket
-
 def extract_token(request: Request) -> Optional[str]:
     token = request.cookies.get("token")
     if not token:
         return None
     return token
-
-def validate_ticket(token: str) -> dict:
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-        print(f"Decoded ticket")  # Debug log
-        return payload
-    except JWTError as e:
-        print(f"JWT decode error: {e}")  # Debug log
-        raise HTTPException(status_code=401, detail="Invalid or expired ticket")
-    except Exception as e:
-        print(f"Unexpected error decoding ticket: {e}")  # Debug log
-        raise HTTPException(status_code=401, detail="Error decoding ticket")
 
 def validate_token(token: str) -> dict:
     try:
