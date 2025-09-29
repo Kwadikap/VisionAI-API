@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import asynccontextmanager
 from apps.vision.config import mail_config
-from apps.vision.shared.auth import SESSION_TTL, TICKET_TTL_MIN, create_token, extract_roles_from_claims, extract_subject_ids, extract_ticket, extract_token, get_agent_tier_from_roles, validate_access_token_raw, validate_ticket, validate_token  
+from apps.vision.shared.auth import SESSION_TTL, TICKET_TTL_MIN, create_token, extract_roles_from_claims, extract_subject_ids, extract_token, get_agent_tier_from_roles, validate_access_token_raw, validate_token  
 
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
@@ -50,9 +50,18 @@ async def add_security_headers(request, call_next):
 
 @app.post("/session/init")
 async def session_init(request: Request) -> JSONResponse:
-    token = extract_token(request)
-    # If token exists don't re-initialize
-    if token: return 
+    # If valid token exists don't re-initialize
+    app_token = request.cookies.get("token")
+    try:
+        claims = validate_token(app_token)
+        session_id = claims["sid"]
+        if session_id in app.state.sessions:
+            return JSONResponse(status_code=200, content={"message": "Session already exists"})
+    except:
+        # if session does not exist, proceed to create new one
+        pass
+    
+    access_token = extract_token(request)
 
     auth = request.headers.get("Authorization")
 
@@ -60,9 +69,9 @@ async def session_init(request: Request) -> JSONResponse:
     user_id = GUEST_USER + secrets.token_urlsafe(24)
 
     if auth and auth.lower().startswith("bearer "):
-        token = auth.split(" ",1)[1]
+        access_token = auth.split(" ",1)[1]
         try:
-            claims = await validate_access_token_raw(token)
+            claims = await validate_access_token_raw(access_token)
             roles = extract_roles_from_claims(claims.model_dump())
             tid, oid = extract_subject_ids(claims.model_dump())
             if tid and oid:
@@ -70,12 +79,12 @@ async def session_init(request: Request) -> JSONResponse:
                 user_id = str((tid, oid))
 
         except Exception as e:
-            raise HTTPException(401,"[session/init] auth invalid -> guest: {e}")
+            raise HTTPException(401,f"[session/init] auth invalid -> guest: {e}")
 
     # Create session
     session = await SessionService.create_session(user_id=user_id)
     # Create token
-    token = create_token(sid=session.id, tier=tier, sub=None)
+    access_token = create_token(sid=session.id, tier=tier, sub=None)
     # Store detials in app state
     app.state.sessions[session.id] = {
         "user_id": user_id,
@@ -88,7 +97,7 @@ async def session_init(request: Request) -> JSONResponse:
 
     resp.set_cookie(
         "token",
-        token,
+        access_token,
         max_age=None if auth else TICKET_TTL_MIN * 60,
         httponly=True,
         secure=True if ENV == "PROD" else False, 

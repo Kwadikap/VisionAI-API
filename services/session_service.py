@@ -56,7 +56,7 @@ class SessionService:
 
     @staticmethod
     async def start_session(session, tier, voice_chat):
-        agent = pro_agent if tier == Tier.PRO else basic_agent
+        agent = pro_agent if tier == Tier.PRO.value else basic_agent
 
         # Setup run config
         speech_config = None
