@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Callable, Tuple
 
 import httpx, time
-from fastapi import Depends, HTTPException, status, Request
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from pydantic import BaseModel
@@ -15,9 +15,9 @@ from apps.vision.shared.types import Tier
 # ---- Config -----------------------------------------------------------------
 
 JWT_SECRET = os.getenv("SESSION_TICKET_SECRET")
-JWT_ALG = "HS256"
+JWT_ALG = os.getenv("JWT_ALG")
 TICKET_TTL_MIN = 15
-SESSION_TTL = 60 * 10  # 10 min
+SESSION_TTL = 60 * 30  # 10 min
 
 TENANT_ID = os.getenv("TENANT_ID", "").strip()
 API_AUDIENCE_ENV = os.getenv("API_AUDIENCE", "")

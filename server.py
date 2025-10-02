@@ -7,6 +7,8 @@ from apps.vision.shared.types import Tier
 load_dotenv()
 
 import os, time, secrets, contextlib, warnings
+from google.adk.events import Event
+from google.genai.types import Content, Part
 from fastapi import BackgroundTasks, FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,7 +53,7 @@ async def add_security_headers(request, call_next):
 @app.post("/session/init")
 async def session_init(request: Request) -> JSONResponse:
     # If valid token exists don't re-initialize
-    app_token = request.cookies.get("token")
+    app_token = extract_token(request)
     try:
         claims = validate_token(app_token)
         session_id = claims["sid"]
@@ -60,8 +62,6 @@ async def session_init(request: Request) -> JSONResponse:
     except:
         # if session does not exist, proceed to create new one
         pass
-    
-    access_token = extract_token(request)
 
     auth = request.headers.get("Authorization")
 
@@ -161,8 +161,37 @@ async def send_message(request: Request):
 
     live_request_queue = session_data.get("live_request_queue")
     request = await request.json()
+    
+    user_id = session_data["user_id"]
+    user_message = request.get("data")
+    await SessionService.append_user_message(user_id=user_id, session_id=session_id, text=user_message)
+
     await SessionService.client_to_agent_sse(live_request_queue, request)
     return JSONResponse({"Message sent": True})
+
+@app.get("/chat-history")
+async def get_history(request: Request):
+    app_token = extract_token(request)
+    if not app_token:
+        raise HTTPException(401, "No session token")
+    try:
+        claims = validate_token(app_token)
+    except Exception:
+        raise HTTPException(401, "Invalid session token")
+
+    session_id = claims.get("sid")
+    session_data = app.state.sessions.get(session_id)
+    if not session_data:
+        return {"session_id": session_id, "messages": []}
+    
+    user_id = session_data["user_id"]
+
+    raw_sessions = await SessionService.list_sessions(user_id=user_id)
+    parsed_sessions = await SessionService.parse_session_data(raw_sessions)
+    print(f"Session history: {parsed_sessions}")
+
+    return {"sessions": parsed_sessions}
+
 
 @app.post("/feedback/send")
 async def send_feedback(background_tasks: BackgroundTasks, request: Request) -> JSONResponse:
