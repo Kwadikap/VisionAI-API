@@ -58,7 +58,7 @@ async def session_init(request: Request) -> JSONResponse:
         claims = validate_token(app_token)
         session_id = claims["sid"]
         if session_id in app.state.sessions:
-            return JSONResponse(status_code=200, content={"message": "Session already exists"})
+            del app.state.sessions[session_id]
     except:
         # if session does not exist, proceed to create new one
         pass
@@ -169,6 +169,7 @@ async def send_message(request: Request):
     await SessionService.client_to_agent_sse(live_request_queue, request)
     return JSONResponse({"Message sent": True})
 
+
 @app.get("/chat-history")
 async def get_history(request: Request):
     app_token = extract_token(request)
@@ -188,7 +189,6 @@ async def get_history(request: Request):
 
     raw_sessions = await SessionService.list_sessions(user_id=user_id)
     parsed_sessions = await SessionService.parse_session_data(raw_sessions)
-    print(f"Session history: {parsed_sessions}")
 
     return {"sessions": parsed_sessions}
 
