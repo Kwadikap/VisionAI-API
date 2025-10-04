@@ -12,3 +12,8 @@ class ChatMessageDTO(BaseModel):
 class ChatHistoryResponse(BaseModel):
     session_id: str
     messages: List[ChatMessageDTO]
+
+class ResumePayload(BaseModel):
+    session_id: str | None = None
+    start_stream: bool = False
+    update_token: bool = True

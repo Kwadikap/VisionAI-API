@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 from fastapi_mail import FastMail, MessageSchema, MessageType
 
 from apps.vision.services.session_service import SessionService
+from apps.vision.shared.models import ResumePayload
 from apps.vision.shared.types import Tier
 load_dotenv()
 
@@ -11,6 +12,7 @@ from google.adk.events import Event
 from google.genai.types import Content, Part
 from fastapi import BackgroundTasks, FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import asynccontextmanager
 from apps.vision.config import mail_config
@@ -57,9 +59,8 @@ async def session_init(request: Request) -> JSONResponse:
     try:
         claims = validate_token(app_token)
         session_id = claims["sid"]
-        if session_id in app.state.sessions:
-            del app.state.sessions[session_id]
-    except:
+
+    except Exception:
         # if session does not exist, proceed to create new one
         pass
 
@@ -84,7 +85,7 @@ async def session_init(request: Request) -> JSONResponse:
     # Create session
     session = await SessionService.create_session(user_id=user_id)
     # Create token
-    access_token = create_token(sid=session.id, tier=tier, sub=None)
+    access_token = create_token(sid=session.id, tier=tier, sub=user_id)
     # Store detials in app state
     app.state.sessions[session.id] = {
         "user_id": user_id,
@@ -182,15 +183,91 @@ async def get_history(request: Request):
 
     session_id = claims.get("sid")
     session_data = app.state.sessions.get(session_id)
-    if not session_data:
-        return {"session_id": session_id, "messages": []}
-    
-    user_id = session_data["user_id"]
+    user_id = (session_data or {}).get("user_id") or claims.get("sub")
+    if not user_id:
+        return {"sessions": []}
 
     raw_sessions = await SessionService.list_sessions(user_id=user_id)
     parsed_sessions = await SessionService.parse_session_data(raw_sessions)
-
     return {"sessions": parsed_sessions}
+
+@app.post("/resume-session")
+async def resume_session(request: Request, payload: ResumePayload):
+    app_token = extract_token(request)
+    if not app_token:
+        raise HTTPException(401, "No session token")
+    claims = validate_token(app_token)
+
+    current_sid = claims.get("sid")
+    tier = claims.get("tier")
+    sub = claims.get("sub")
+
+    # Resolve user_id (prefer state, fallback to token sub)
+    session_data = app.state.sessions.get(current_sid) if current_sid else None
+    user_id = (session_data or {}).get("user_id") or sub
+    if not user_id:
+        return {"sessions": []}
+
+    target_sid = payload.session_id or current_sid
+    if not target_sid:
+        return {"sessions": []}
+
+    # Validate target session belongs to this user and fetch it
+    try:
+        target_session = await SessionService.get_session(user_id, target_sid)
+    except Exception:
+        raise HTTPException(404, "Session not found for user")
+
+    # Ensure minimal state entry exists
+    sd = app.state.sessions.get(target_sid)
+    if not sd:
+        app.state.sessions[target_sid] = {
+            "user_id": user_id,
+            "tier": tier,
+            "session_id": target_sid,
+            "created_at": time.time(),
+        }
+        sd = app.state.sessions[target_sid]
+
+    # Optionally start a live session for target
+    started = False
+    if payload.start_stream and not sd.get("live_request_queue"):
+        live_events, live_request_queue = await SessionService.start_session(
+            session=target_session, tier=tier, voice_chat=False
+        )
+        sd["live_request_queue"] = live_request_queue
+        started = True
+
+    # If switching sessions, close previous live queue and rotate cookie
+    if payload.update_token and current_sid and target_sid != current_sid:
+        prev = app.state.sessions.get(current_sid)
+        if prev and prev.get("live_request_queue"):
+            with contextlib.suppress(Exception):
+                await prev["live_request_queue"].close()
+            prev.pop("live_request_queue", None)
+
+    # Build response (filter to the requested session if provided)
+    raw = await SessionService.list_sessions(user_id=user_id)
+    parsed = await SessionService.parse_session_data(raw)
+    if payload.session_id:
+        parsed = [p for p in parsed if p.session_id == target_sid]
+
+    resp = JSONResponse(status_code=200, content=jsonable_encoder({"sessions": parsed}))
+
+    # Optionally update cookie to target session
+    if payload.update_token and target_sid != current_sid:
+        new_token = create_token(sid=target_sid, tier=tier, sub=user_id)
+        resp.set_cookie(
+            "token",
+            new_token,
+            max_age=None if sub else TICKET_TTL_MIN * 60,
+            httponly=True,
+            secure=True if ENV == "PROD" else False,
+            samesite="Lax",
+            path="/",
+        )
+        
+    return resp
 
 
 @app.post("/feedback/send")
